@@ -25,7 +25,7 @@ from ppdet.core.workspace import register
 from ppdet.modeling.ops import (AnchorGenerator, RPNTargetAssign,
                                 GenerateProposals)
 
-__all__ = ['RPNTargetAssign', 'GenerateProposals', 'RPNHead', 'FPNRPNHead']
+__all__ = ['RPNTargetAssign', 'GenerateProposals', 'RPNHead', 'FPNRPNHead', 'ThunderNetRPNHead']
 
 
 @register
@@ -355,8 +355,8 @@ class FPNRPNHead(RPNHead):
         self.anchors, self.anchor_var = self.anchor_generator(
             input=conv_rpn_fpn,
             anchor_sizes=(self.anchor_start_size * 2.
-                          **(feat_lvl - self.min_level), ),
-            stride=(2.**feat_lvl, 2.**feat_lvl))
+                          ** (feat_lvl - self.min_level),),
+            stride=(2. ** feat_lvl, 2. ** feat_lvl))
 
         cls_num_filters = num_anchors * self.num_classes
         self.rpn_cls_score = fluid.layers.conv2d(
@@ -495,3 +495,103 @@ class FPNRPNHead(RPNHead):
         anchors = fluid.layers.concat(anchors)
         anchor_var = fluid.layers.concat(anchor_vars)
         return rpn_cls, rpn_bbox, anchors, anchor_var
+
+
+@register
+class ThunderNetRPNHead(RPNHead):
+    def _get_output(self, input):
+        """
+        Get anchor and RPN head output.
+
+        Args:
+            input(Variable): feature map from backbone with shape of [N, C, H, W]
+
+        Returns:
+            rpn_cls_score(Variable): Output of rpn head with shape of
+                [N, num_anchors, H, W].
+            rpn_bbox_pred(Variable): Output of rpn head with shape of
+                [N, num_anchors * 4, H, W].
+        """
+        # Generate anchors
+        self.anchor, self.anchor_var = self.anchor_generator(input=input)
+        num_anchor = self.anchor.shape[2]
+        # Proposal classification scores
+        self.rpn_cls_score = fluid.layers.conv2d(
+            input,
+            num_filters=num_anchor * self.num_classes,
+            filter_size=1,
+            stride=1,
+            padding=0,
+            act=None,
+            name='rpn_cls_score',
+            param_attr=ParamAttr(
+                name="rpn_cls_logits_w", initializer=Normal(
+                    loc=0., scale=0.01)),
+            bias_attr=ParamAttr(
+                name="rpn_cls_logits_b",
+                learning_rate=2.,
+                regularizer=L2Decay(0.)))
+        # Proposal bbox regression deltas
+        self.rpn_bbox_pred = fluid.layers.conv2d(
+            input,
+            num_filters=4 * num_anchor,
+            filter_size=1,
+            stride=1,
+            padding=0,
+            act=None,
+            name='rpn_bbox_pred',
+            param_attr=ParamAttr(
+                name="rpn_bbox_pred_w", initializer=Normal(
+                    loc=0., scale=0.01)),
+            bias_attr=ParamAttr(
+                name="rpn_bbox_pred_b",
+                learning_rate=2.,
+                regularizer=L2Decay(0.)))
+        return self.rpn_cls_score, self.rpn_bbox_pred
+
+    def get_proposals(self, body_feats, im_info, mode='train'):
+        """
+        Get proposals according to the output of backbone.
+
+        Args:
+            body_feats (dict): The dictionary of feature maps from backbone.
+            im_info(Variable): The information of image with shape [N, 3] with
+                shape (height, width, scale).
+            body_feat_names(list): A list of names of feature maps from
+                backbone.
+
+        Returns:
+            rpn_rois(Variable): Output proposals with shape of (rois_num, 4).
+        """
+
+        # In RPN Heads, only the last feature map of backbone is used.
+        # And body_feat_names[-1] represents the last level name of backbone.
+        body_feat = body_feats['rpn_feats']
+        rpn_cls_score, rpn_bbox_pred = self._get_output(body_feat)
+
+        if self.num_classes == 1:
+            rpn_cls_prob = fluid.layers.sigmoid(
+                rpn_cls_score, name='rpn_cls_prob')
+        else:
+            rpn_cls_score = fluid.layers.transpose(
+                rpn_cls_score, perm=[0, 2, 3, 1])
+            rpn_cls_score = fluid.layers.reshape(
+                rpn_cls_score, shape=(0, 0, 0, -1, self.num_classes))
+            rpn_cls_prob_tmp = fluid.layers.softmax(
+                rpn_cls_score, use_cudnn=False, name='rpn_cls_prob')
+            rpn_cls_prob_slice = fluid.layers.slice(
+                rpn_cls_prob_tmp, axes=[4], starts=[1],
+                ends=[self.num_classes])
+            rpn_cls_prob, _ = fluid.layers.topk(rpn_cls_prob_slice, 1)
+            rpn_cls_prob = fluid.layers.reshape(
+                rpn_cls_prob, shape=(0, 0, 0, -1))
+            rpn_cls_prob = fluid.layers.transpose(
+                rpn_cls_prob, perm=[0, 3, 1, 2])
+        prop_op = self.train_proposal if mode == 'train' else self.test_proposal
+        rpn_rois, rpn_roi_probs = prop_op(
+            scores=rpn_cls_prob,
+            bbox_deltas=rpn_bbox_pred,
+            im_info=im_info,
+            anchors=self.anchor,
+            variances=self.anchor_var)
+        return rpn_rois

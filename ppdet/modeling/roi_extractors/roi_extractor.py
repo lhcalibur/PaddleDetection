@@ -16,12 +16,14 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+from numbers import Integral
+
 import paddle.fluid as fluid
 
 from ppdet.core.workspace import register
 from ppdet.modeling.ops import RoIAlign, RoIPool
 
-__all__ = ['RoIPool', 'RoIAlign', 'FPNRoIAlign']
+__all__ = ['RoIPool', 'RoIAlign', 'FPNRoIAlign', 'ThunderNetRoIAlign']
 
 
 @register
@@ -95,3 +97,27 @@ class FPNRoIAlign(object):
         roi_feat = fluid.layers.lod_reset(roi_feat_, rois)
 
         return roi_feat
+
+
+@register
+class ThunderNetRoIAlign(object):
+    def __init__(self,
+                 resolution=7,
+                 spatial_scale=1. / 16,
+                 sampling_ratio=0):
+        if isinstance(resolution, Integral):
+            resolution = [resolution, resolution]
+        self.pooled_height = resolution[0]
+        self.pooled_width = resolution[1]
+        self.spatial_scale = spatial_scale
+        self.sampling_ratio = sampling_ratio
+
+    def __call__(self, body_feats, rois):
+        roi_out = fluid.layers.roi_align(
+            input=body_feats,
+            rois=rois,
+            pooled_height=self.pooled_height,
+            pooled_width=self.pooled_width,
+            spatial_scale=self.spatial_scale,
+            sampling_ratio=self.sampling_ratio)
+        return roi_out

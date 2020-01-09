@@ -29,7 +29,7 @@ from ppdet.modeling.ops import ConvNorm
 from ppdet.core.workspace import register, serializable
 from ppdet.experimental import mixed_precision_global_state
 
-__all__ = ['BBoxHead', 'TwoFCHead', 'XConvNormHead']
+__all__ = ['BBoxHead', 'TwoFCHead', 'XConvNormHead', 'OneFCHead']
 
 
 @register
@@ -212,7 +212,7 @@ class BBoxHead(object):
         """
         head_feat = self.get_head_feat(roi_feat)
         # when ResNetC5 output a single feature map
-        if not isinstance(self.head, TwoFCHead) and not isinstance(
+        if not isinstance(self.head, (TwoFCHead, OneFCHead)) and not isinstance(
                 self.head, XConvNormHead):
             head_feat = fluid.layers.pool2d(
                 head_feat, pool_type='avg', global_pooling=True)
@@ -317,3 +317,42 @@ class BBoxHead(object):
             return {'bbox': cliped_box, 'score': cls_prob}
         pred_result = self.nms(bboxes=cliped_box, scores=cls_prob)
         return {'bbox': pred_result}
+
+
+@register
+class OneFCHead(object):
+    """
+    RCNN head with one Fully Connected layers
+
+    Args:
+        mlp_dim (int): num of filters for the fc layers
+    """
+
+    def __init__(self, mlp_dim=1024):
+        super(OneFCHead, self).__init__()
+        self.mlp_dim = mlp_dim
+
+    def __call__(self, roi_feat):
+        fan = roi_feat.shape[1] * roi_feat.shape[2] * roi_feat.shape[3]
+
+        mixed_precision_enabled = mixed_precision_global_state() is not None
+
+        if mixed_precision_enabled:
+            roi_feat = fluid.layers.cast(roi_feat, 'float16')
+
+        head_feat = fluid.layers.fc(input=roi_feat,
+                                    size=self.mlp_dim,
+                                    act='relu',
+                                    name='fc6',
+                                    param_attr=ParamAttr(
+                                        name='fc6_w',
+                                        initializer=Xavier(fan_out=fan)),
+                                    bias_attr=ParamAttr(
+                                        name='fc6_b',
+                                        learning_rate=2.,
+                                        regularizer=L2Decay(0.)))
+
+        if mixed_precision_enabled:
+            head_feat = fluid.layers.cast(head_feat, 'float32')
+
+        return head_feat
