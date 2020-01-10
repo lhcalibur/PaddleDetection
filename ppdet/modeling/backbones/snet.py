@@ -115,16 +115,15 @@ class SNet(object):
         return x
 
     @staticmethod
-    def _cem(c_4, c_5):
+    def _cem(c_3, c_4):
         with fluid.name_scope("context_enhancement_module"):
-            c_glb = fluid.layers.pool2d(c_5, pool_type='avg', global_pooling=True)
-            c_glb = fluid.layers.reshape(c_glb, [-1, 1, 1, c_glb.shape[1]])
+            c_3 = fluid.layers.conv2d(c_3, 245, 1, 1, padding='SAME')
             c_4 = fluid.layers.conv2d(c_4, 245, 1, 1, padding='SAME')
-            c_5 = fluid.layers.conv2d(c_5, 245, 1, 1, padding='SAME')
+            c_glb = fluid.layers.pool2d(c_4, pool_type='avg', global_pooling=True)
+            c_glb = fluid.layers.reshape(c_glb, [-1, c_glb.shape[1], 1, 1])
             c_glb = fluid.layers.conv2d(c_glb, 245, 1, 1, padding='SAME')
-
-            c_5 = fluid.layers.resize_nearest(c_5, scale=2.0)
-            x = c_4 + c_5 + c_glb
+            c_4 = fluid.layers.resize_nearest(c_4, scale=2.0)
+            x = c_3 + c_4 + c_glb
             return x
 
     @staticmethod
@@ -138,7 +137,8 @@ class SNet(object):
     def _sam(self, cem_features, rpn_features):
         cem_channels = cem_features.shape[1]
         with fluid.name_scope("spatial_attention_module"):
-            attn = self._conv_norm(rpn_features, cem_channels, 1, 1, padding='SAME', act='sigmoid')
+            attn = fluid.layers.conv2d(rpn_features, cem_channels, 1, 1, padding='SAME')
+            attn = fluid.layers.sigmoid(attn)
             sam_features = fluid.layers.elementwise_mul(cem_features, attn)
             return sam_features
 
@@ -146,7 +146,7 @@ class SNet(object):
         output_channels = self.stages_out_channels[0]
         with fluid.name_scope('conv1'):
             x = self._conv_norm(input, output_channels, 3, 2, 'SAME')
-        x = fluid.layers.pool2d(x, 3, 'max', 2, pool_padding='SAME', name='maxpool2d')
+        x = fluid.layers.pool2d(x, 3, 'max', 2, pool_padding=1, name='maxpool2d')
         stage_names = ['stage{}'.format(i) for i in [2, 3, 4]]
         for name, repeats, output_channels in zip(
                 stage_names, self.stages_repeats, self.stages_out_channels[1:]):
@@ -155,15 +155,15 @@ class SNet(object):
                 for i in range(repeats - 1):
                     x = self._shuffle_unit(x, output_channels, False)
                 if name == 'stage3':
-                    c_4 = x
+                    c_3 = x
                 elif name == 'stage4':
-                    c_5 = x
+                    c_4 = x
         if self.backbone_arch == SNetArch.SNet49:
             with fluid.name_scope("Conv5"):
                 output_channels = self.stages_out_channels[-1]
                 x = self._conv_norm(x, output_channels, 1, 1, 'SAME')
-                c_5 = x
-        cem_out = self._cem(c_4, c_5)
+                c_4 = x
+        cem_out = self._cem(c_3, c_4)
         rpn_feats = self._rpn_backbone(cem_out)
         sam_out = self._sam(cem_out, rpn_feats)
         return OrderedDict(rpn_feats=rpn_feats, sam=sam_out)
